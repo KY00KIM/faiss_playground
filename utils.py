@@ -31,14 +31,15 @@ def get_index_list() -> List[str]:
     encoding_suffix = [
         "Flat",
         "PQ16",
+        "PQ64",
     ]
     res = []
     for transform in vec_transform_suffix:
         for search in search_suffix:
             for encoding in encoding_suffix:
                 res.append(concat_index_name(transform, search, encoding))
-                print(concat_index_name(transform, search, encoding))
-        print()
+        #         print(concat_index_name(transform, search, encoding))
+        # print()
     return res
 
 
