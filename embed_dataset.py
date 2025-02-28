@@ -1,15 +1,15 @@
-from argparse import Namespace
-import time
+import multiprocessing
 import os
-
+import time
+from argparse import Namespace
 from pathlib import Path
 from typing import Dict, List
-import multiprocessing
+
 import datasets
 import numpy as np
 from datasets import load_dataset
 from dotenv import load_dotenv
-from numpy.typing import NDArray, DTypeLike
+from numpy.typing import DTypeLike, NDArray
 from tqdm import tqdm
 
 load_dotenv()
@@ -30,81 +30,6 @@ def print_dataset_info(dataset):
         print(f"- Number of Samples: {len(dataset)}")
         print(f"- Columns: {dataset.column_names}")
         print(f"- Data Types: {dataset.features}")
-
-
-# def process_chunk(args):
-#     ds, start, end, chunk_id, dtype = args
-#     batch = ds[start:end]
-#     batch_embs = np.array([row for row in batch["emb"]], dtype=dtype)
-#
-#     temp_file = f"temp_chunk_{chunk_id}.npy"
-#     np.save(temp_file, batch_embs)
-#     return temp_file
-#
-#
-# def merge_temp_npy(temp_files: List[str], output_file: str, dtype, num_rows, dim):
-#     t0 = time.time()
-#     print("Merging temporary files into final np.memmap...")
-#     embs = np.memmap(output_file, dtype=dtype, mode="w+", shape=(num_rows, dim))
-#     index = 0
-#     for temp_file in tqdm(temp_files):
-#         temp_data = np.load(temp_file, mmap_mode="r")
-#         embs[index : index + temp_data.shape[0]] = temp_data
-#         index += temp_data.shape[0]
-#     del embs
-#     print(f"Embeddings saved to {output_file} in {time.time()-t0:.2f}s")
-#
-#     return output_file
-
-
-# def dataset_2_numpy(ds):
-#     MAX_DOC = 10_000_000
-#     CHUNK_SIZE = 100_000
-#     OUTPUT_FILE = "wiki-en-emb.npy"
-#     NUM_PROC = cpu_count() - 2
-#     num_rows = len(ds)
-#     dim = len(ds[0]["emb"])
-#     dtype = np.float32
-#
-#     # 1. Numpy conversion iteration 1.5k/s
-#     # ds = load_dataset("Cohere/wikipedia-22-12-en-embeddings", cache_dir="./data", split='train', streaming=True)
-#     # embs = np.empty((num_rows, dim), dtype=dtype)
-#     # for i, row in tqdm(enumerate(ds)):
-#     #     embs[i] = np.array(row['emb'], dtype=dtype)
-#     # save_ndarray(embs, OUTPUT_FILE)
-#
-#     # 2. Numpy conversion in chunked
-#     # 1k --> 1.5k/s
-#     # embs = np.memmap('embs.npy', dtype=dtype, mode='w+', shape=(num_rows, dim))
-#     # for i in tqdm(range(0, num_rows, CHUNK_SIZE)):
-#     #     batch = ds[i:i+CHUNK_SIZE]
-#     #     batch_embs = np.array([row for row in batch['emb']], dtype=dtype)
-#     #     embs[i:i+CHUNK_SIZE] = batch_embs
-#     # save_ndarray(embs, OUTPUT_FILE)
-#
-#     # 3. Numpy conversion in multiprocess chunking
-#     # 30 process, 100K chunk 2815sec -> split
-#     print(f"Parallel processing strart w/ {NUM_PROC} process, {CHUNK_SIZE}chunk")
-#     chunk_args = [
-#         (ds, i, min(i + CHUNK_SIZE, num_rows), chunk_id, dtype)
-#         for chunk_id, i in enumerate(range(0, num_rows, CHUNK_SIZE))
-#     ]
-#     # multiproc processing
-#     t1 = time.time()
-#     with Pool(NUM_PROC) as pool:
-#         temp_files = list(
-#             tqdm(pool.imap(process_chunk, chunk_args), total=len(chunk_args))
-#         )
-#     print(f"Parallel embedding processing took {time.time()-t1:.2f}s")
-#
-#     # Merge temp files
-#     temp_files = [
-#         f"temp_chunk_{chunk_id}.npy"
-#         for chunk_id, _ in enumerate(range(0, int(num_rows * 0.5), CHUNK_SIZE))
-#     ]
-#     merge_temp_npy(temp_files, OUTPUT_FILE, dtype, num_rows, CHUNK_SIZE)
-#
-#     return OUTPUT_FILE
 
 
 def download_dataset(
@@ -147,7 +72,9 @@ def convert_chunk_to_ndarr(
     return arr
 
 
-def extract_embedding(dataset, dtype: DTypeLike, chunk_size: int = 1000) -> NDArray:
+def extract_embedding_mmap(
+    dataset, memmap_f: str, dtype: DTypeLike, chunk_size: int = 1000
+):
     """
     Assumption:
         - embedding at `dataset['emb']`
@@ -155,14 +82,24 @@ def extract_embedding(dataset, dtype: DTypeLike, chunk_size: int = 1000) -> NDAr
     """
     ntotal = len(dataset)
     dim = len(dataset[0]["emb"])
-    embs = np.empty(shape=(ntotal, dim), dtype=dtype)
 
-    for i in tqdm(range(0, ntotal, chunk_size)):
-        batch = dataset[i : i + chunk_size]
+    embs_mem = np.memmap(
+        memmap_f,
+        dtype=dtype,
+        mode="w+",
+        shape=(ntotal, dim),
+    )
+
+    for start_idx in tqdm(range(0, ntotal, chunk_size)):
+        end_idx = min(start_idx + chunk_size, ntotal)
+        batch = dataset[start_idx:end_idx]
         batch_embs = np.stack(batch["emb"]).astype(dtype)
-        embs[i : i + chunk_size] = batch_embs
+        embs_mem[start_idx:end_idx, :] = batch_embs
 
-    return embs
+    embs_mem.flush()
+    np.save(memmap_f.split(".memmap")[0], embs_mem)
+    del embs_mem
+    os.remove(memmap_f)
 
 
 def main(args: Namespace):
@@ -173,10 +110,16 @@ def main(args: Namespace):
             args, "output_emb"
         ), "output path for embedding is not provided (--output-emb)"
         os.makedirs(os.path.dirname(args.output_emb), exist_ok=True)
-        embs = extract_embedding(ds, np.float32, chunk_size=args.batch)
-        np.save(args.output_emb, embs)
+        extract_embedding_mmap(
+            ds, args.output_emb + ".memmap", np.float32, chunk_size=args.batch
+        )
         try:
-            embs = np.load(args.output_emb, mmap_mode="r")
+            embs = np.memmap(
+                args.output_emb,
+                dtype=np.float32,
+                mode="r",
+                shape=(len(ds), len(ds[0]["emb"])),
+            )
             print("Successfully loaded after save:", embs.shape)
         except Exception as e:
             print("Failed to load after save:", e)

@@ -9,7 +9,7 @@ import numpy as np
 from numpy.typing import NDArray
 from tqdm import tqdm
 
-from utils import get_index_list, get_index_prefix
+from utils import get_index_list, get_index_prefix, ntfy
 
 
 def sample_train_vecs(dataset: NDArray, sample_ratio: float) -> NDArray:
@@ -116,7 +116,7 @@ def train_all(
     n_max_thread = faiss.omp_get_max_threads()
     if n_gpu < 1:
         faiss.omp_set_num_threads(n_thread)
-    for index in tqdm(index_list, desc="index train"):
+    for i, index in tqdm(enumerate(index_list), desc="index train"):
         try:
             _, info = train_idx(
                 index_name=index,
@@ -147,6 +147,9 @@ def train_all(
                 train_info = {"index": index}
                 train_info["error"] = str(e)
                 train_data.append(train_info)
+        ntfy(
+            f"{index} training done {i+1}/{len(index_list)}: \ndetail:{train_data[-1]}"
+        )
     if n_gpu < 1:
         faiss.omp_set_num_threads(n_max_thread)
     print("Train Summary=============")
@@ -164,7 +167,6 @@ def train_all(
 
 
 def add_idx(index, base_vec: NDArray):
-    index.verbose = True
     index.add(base_vec)
     return index
 
@@ -172,9 +174,13 @@ def add_idx(index, base_vec: NDArray):
 def add_idx_all_dir(index_base_dir: str, index_output_dir: str, embs: NDArray):
     index_paths = [f for f in os.listdir(index_base_dir) if f.endswith(".faiss")]
 
-    for index_filename in tqdm(index_paths, desc="Populate Index"):
+    for i, index_filename in tqdm(enumerate(index_paths), desc="Populate Index"):
         output_path = os.path.join(index_output_dir, index_filename)
+        if os.path.exists(output_path):
+            continue
+        t0 = time.perf_counter()
         index = faiss.read_index(os.path.join(index_base_dir, index_filename))
+        t1 = time.perf_counter()
         populated_idx = add_idx(index, embs)
         faiss.write_index(populated_idx, output_path)
         populated_idx = faiss.read_index(output_path)
@@ -187,11 +193,18 @@ def add_idx_all_dir(index_base_dir: str, index_output_dir: str, embs: NDArray):
                 "/",
                 embs.shape[0],
             )
+            ntfy(
+                f"{index_filename} Add failed {i+1}/{len(index_paths)}\ntime:{t1-t0}sec\npath:{index_base_dir}"
+            )
+        else:
+            ntfy(
+                f"{index_filename} Add done {i+1}/{len(index_paths)}\ntime:{t1-t0}sec\npath:{index_base_dir}"
+            )
 
 
 def main(args):
     assert args.embedding_path.exists(), "Embedding path does not exists"
-    embs = np.load(args.embedding_path)
+    embs = np.load(args.embedding_path, mmap_mode="r")
     emb_size = embs.shape[0]
     assert args.embedding_num == -1 or (
         args.embedding_num > 0 and args.embedding_num <= emb_size

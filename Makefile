@@ -17,7 +17,7 @@ BATCH           ?= 1000
 # -----------------------------------------------------------
 # Index Variables:
 # -----------------------------------------------------------
-INDEX            ?= Flat IVF1024,Flat IVF1024,PQ16 IVF1024,PQ64 IVF4096,Flat IVF4096,PQ16 IVF4096,PQ64 IVF65536,Flat IVF65536,PQ16 IVF65536,PQ64
+INDEX            ?= Flat IVF1024,Flat IVF1024,PQ16 IVF1024,PQ64 IVF4096,Flat IVF4096,PQ16 IVF4096,PQ64 IVF65536,Flat IVF65536,PQ16 
 INDEX_BASE_DIR   ?= ./index_base
 INDEX_OUTPUT_DIR ?= ./index_populated
 EMBEDDING_PATH   ?= ./wiki-1M-emb.npy
@@ -28,15 +28,30 @@ TRAIN_JSONL_PATH ?= train_data.jsonl
 NUM_GPU          ?= 2
 NUM_THREAD       ?= 16
 
-# Default
-all: help
+# -----------------------------------------------------------
+# Benchmark Variables:
+# -----------------------------------------------------------
+OUTPUT_CSV_PATH   ?= benchmark.csv
+EVAL_RATIO        ?= 0.2
+QUERY_SIZE        ?= 1000
+BENCHMARK_PROCESS ?= auto_tune
 
-# install:
-# 	pip install -r requirements.txt
+# -----------------------------------------------------------
+# Default Target
+# -----------------------------------------------------------
+all: help
 
 # -----------------------------------------------------------
 # Targets to run embed_dataset.py with different modes
 # -----------------------------------------------------------
+benchmark:
+	python benchmark_index.py \
+		--process $(BENCHMARK_PROCESS) \
+		--index-dir $(INDEX_OUTPUT_DIR) \
+		--emb-path $(EMBEDDING_PATH) \
+		--output-csv $(OUTPUT_CSV_PATH) \
+		--query-size $(QUERY_SIZE) 
+	
 index-train:
 	python train_index.py \
 		--process train \
@@ -74,29 +89,29 @@ index-all:
 
 extract-emb:
 	python embed_dataset.py \
+		--process extract-emb \
 		--dataset $(DATASET) \
 		--dataset-cache-dir $(DATASET_CACHE_DIR) \
 		--dataset-split $(DATASET_SPLIT) \
-		--process extract-emb \
 		--output-emb $(OUTPUT_EMB) \
 		--batch $(BATCH)
 
 extract-chunk:
 	python embed_dataset.py \
+		--process extract-chunk \
 		--dataset $(DATASET) \
 		--dataset-cache-dir $(DATASET_CACHE_DIR) \
 		--dataset-split $(DATASET_SPLIT) \
-		--process extract-chunk \
 		--output-chunk $(OUTPUT_CHUNK) \
 		--chunk-cpu-ratio $(CHUNK_CPU_RATIO) \
 		--batch $(BATCH)
 
 extract-all:
 	python embed_dataset.py \
+		--process all \
 		--dataset $(DATASET) \
 		--dataset-cache-dir $(DATASET_CACHE_DIR) \
 		--dataset-split $(DATASET_SPLIT) \
-		--process all \
 		--output-emb $(OUTPUT_EMB) \
 		--output-chunk $(OUTPUT_CHUNK) \
 		--chunk-cpu-ratio $(CHUNK_CPU_RATIO) \
@@ -105,6 +120,7 @@ extract-all:
 help:
 	@echo "Makefile for FAISS Playground"
 	@echo "Available targets:"
+	@echo "  benchmark        - Benchmark indexes from directory."
 	@echo "  extract-emb      - Extract embeddings from dataset as ndarray."
 	@echo "  extract-chunk    - Extract text chunks from dataset as ndarray."
 	@echo "  extract-all      - Extract embeddings and text chunks from dataset as ndarray."
