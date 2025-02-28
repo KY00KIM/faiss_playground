@@ -1,0 +1,109 @@
+FROM nvidia/cuda:12.2.2-devel-ubuntu22.04 AS builder
+
+ARG FAISS_OPT="avx512"
+ARG FAISS_COMMIT="4c315a93"
+ARG CMAKE_VERSION="3.30.8"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+  TZ="Asia/Seoul" \
+  LANG=C.UTF-8 \
+  MKLROOT=/opt/intel/oneapi/mkl/latest \
+  LD_LIBRARY_PATH=/opt/intel/oneapi/mkl/latest/lib/intel64:$LD_LIBRARY_PATH
+
+WORKDIR /app
+
+RUN apt-get update && \
+  apt-get install -y --no-install-recommends \
+  git \
+  curl \
+  gnupg \
+  ca-certificates \
+  tzdata &&\
+  echo "deb http://archive.ubuntu.com/ubuntu/ bionic main universe" >> /etc/apt/sources.list &&\
+  apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 3B4FE6ACC0B21F32 &&\
+  curl -fsSL https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB |gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null &&\
+  echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list &&\
+  apt-get update &&\
+  apt-get install -y --no-install-recommends python3.11 python3.11-dev python3.11-distutils python3-venv \
+  python3-pip \
+  g++-9 gcc-9 \
+  libomp-dev libssl-dev \
+  intel-oneapi-mkl \
+  && \
+  update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 60 --slave /usr/bin/g++ g++ /usr/bin/g++-9 && \
+  update-alternatives --set gcc /usr/bin/gcc-9 && \
+  ln -fs /usr/share/zoneinfo/$TZ /etc/localtime && \
+  echo $TZ > /etc/timezone && \
+  dpkg-reconfigure --frontend noninteractive tzdata && \
+  rm -rf /var/lib/apt/lists/*
+
+RUN curl -L "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}.tar.gz" \
+  -o cmake.tar.gz && \
+  tar -zxvf cmake.tar.gz && \
+  cd cmake-${CMAKE_VERSION} && \
+  ./bootstrap && \
+  make -j"$(nproc)" && \
+  make install && \
+  cd /app && \
+  rm -rf cmake-${CMAKE_VERSION} cmake.tar.gz
+
+RUN python3.11 -m pip install --upgrade pip setuptools wheel &&\
+  python3.11 -m pip install swig && \
+  python3.11 -m pip install -i https://pypi.anaconda.org/intel/simple numpy 
+
+RUN git clone https://github.com/facebookresearch/faiss.git && \
+  cd faiss && \
+  git checkout $FAISS_COMMIT &&\
+  CC=gcc CXX=g++ cmake -B build . \
+  -DPython_EXECUTABLE=$(which python3.11) \
+  -DBUILD_TESTING=OFF \
+  -DCUDAToolkit_ROOT=/usr/local/cuda \
+  -DBUILD_SHARED_LIBS=ON \
+  -DFAISS_OPT_LEVEL=${FAISS_OPT} \
+  -DFAISS_ENABLE_GPU=ON \
+  -DFAISS_ENABLE_PYTHON=ON && \
+  if [ "$FAISS_OPT" = "generic" ]; then \
+  make -C build -j faiss; \
+  else \
+  make -C build -j faiss_${FAISS_OPT}; \
+  fi && \
+  make -C build -j swigfaiss && \
+  make -C build install  &&\
+  cd build/faiss/python && \
+  python3.11 setup.py bdist_wheel -d /app/dist
+
+FROM nvidia/cuda:12.2.2-runtime-ubuntu22.04 AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive \
+  TZ="Asia/Seoul" \
+  LANG=C.UTF-8 \
+  MKLROOT=/opt/intel/oneapi/mkl/latest \
+  LD_LIBRARY_PATH=/usr/local/lib/python3.11/dist-packages/faiss:/opt/intel/oneapi/mkl/latest/lib/intel64:$LD_LIBRARY_PATH
+
+RUN apt-get update && \
+  apt-get install -y libgomp1 gnupg ca-certificates curl && \
+  curl -fsSL https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
+  | gpg --dearmor \
+  | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
+  echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list && \
+  apt-get update && \
+  apt-get install -y --no-install-recommends \
+  python3.11 python3.11-distutils python3.11-dev python3-venv python3-pip \
+  intel-oneapi-mkl \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/dist /app/dist
+COPY --from=builder /usr/local/include/faiss /usr/local/include/faiss
+COPY --from=builder /usr/local/lib/libfaiss* /usr/local/lib/
+RUN ldconfig
+
+RUN python3.11 -m pip install --upgrade pip && \
+  python3.11 -m pip install -i https://pypi.anaconda.org/intel/simple numpy &&\ 
+  python3.11 -m pip install /app/dist/faiss*.whl &&\
+  rm -rf /app/dist &&\
+  cd /usr/bin &&\
+  ln -sf python3.11 python3 &&\ 
+  ln -sf python3 python 
+
+WORKDIR /app
+CMD ["/bin/bash"]
